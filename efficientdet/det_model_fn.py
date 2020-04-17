@@ -454,7 +454,9 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
 
     if params.get('clip_gradients_norm', 0) > 0:
       logging.info('clip gradients norm by %f', params['clip_gradients_norm'])
-      grads_and_vars = optimizer.compute_gradients(total_loss, var_list)
+      grads_and_vars = optimizer.compute_gradients(total_loss,
+                                                    var_list,
+                                                    aggregation_method=tf.AggregationMethod.EXPERIMENTAL_ACCUMULATE_N)
       with tf.name_scope('clip'):
         grads = [gv[0] for gv in grads_and_vars]
         tvars = [gv[1] for gv in grads_and_vars]
@@ -468,7 +470,7 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
     else:
       with tf.control_dependencies(update_ops):
         train_op = optimizer.minimize(
-            total_loss, global_step, var_list=var_list)
+            total_loss, global_step, var_list=var_list, aggregation_method=tf.AggregationMethod.EXPERIMENTAL_ACCUMULATE_N)
 
     if moving_average_decay:
       with tf.control_dependencies([train_op]):
