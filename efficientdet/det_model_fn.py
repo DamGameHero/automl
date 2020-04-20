@@ -102,6 +102,17 @@ def cosine_lr_schedule(adjusted_lr, lr_warmup_init, lr_warmup_step,
   return tf.where(step < lr_warmup_step, linear_warmup, cosine_lr)
 
 
+def polynomial_lr_schedule(adjusted_lr, lr_warmup_init, lr_warmup_step, power,
+                           total_steps, step):
+  logging.info('LR schedule method: polynomial')
+  linear_warmup = (
+      lr_warmup_init + (tf.cast(step, dtype=tf.float32) / lr_warmup_step *
+                        (adjusted_lr - lr_warmup_init)))
+  polynomial_lr = adjusted_lr * tf.pow(
+      1 - (tf.cast(step, tf.float32) / total_steps), power)
+  return tf.where(step < lr_warmup_step, linear_warmup, polynomial_lr)
+
+
 def learning_rate_schedule(params, global_step):
   """Learning rate schedule based on global step."""
   lr_decay_method = params['lr_decay_method']
@@ -111,13 +122,18 @@ def learning_rate_schedule(params, global_step):
                                 params['lr_warmup_step'],
                                 params['first_lr_drop_step'],
                                 params['second_lr_drop_step'], global_step)
-  elif lr_decay_method == 'cosine':
+  if lr_decay_method == 'cosine':
     return cosine_lr_schedule(params['adjusted_learning_rate'],
                               params['lr_warmup_init'],
                               params['lr_warmup_step'],
                               params['total_steps'], global_step)
-  else:
-    raise ValueError('unknown lr_decay_method: {}'.format(lr_decay_method))
+  if lr_decay_method == 'polynomial':
+    return polynomial_lr_schedule(params['adjusted_learning_rate'],
+                                  params['lr_warmup_init'],
+                                  params['lr_warmup_step'],
+                                  params['poly_lr_power'],
+                                  params['total_steps'], global_step)
+  raise ValueError('unknown lr_decay_method: {}'.format(lr_decay_method))
 
 
 def focal_loss(logits, targets, alpha, gamma, normalizer):
@@ -239,8 +255,10 @@ def detection_loss(cls_outputs, box_outputs, labels, params):
   box_losses = []
   for level in levels:
     if params['data_format'] == 'channels_first':
-      labels['cls_targets_%d' % level] = tf.transpose(labels['cls_targets_%d' % level], [0, 3, 1, 2])
-      labels['box_targets_%d' % level] = tf.transpose(labels['box_targets_%d' % level], [0, 3, 1, 2])
+      labels['cls_targets_%d' % level] = tf.transpose(
+          labels['cls_targets_%d' % level], [0, 3, 1, 2])
+      labels['box_targets_%d' % level] = tf.transpose(
+          labels['box_targets_%d' % level], [0, 3, 1, 2])
     # Onehot encoding for classification labels.
     cls_targets_at_level = tf.one_hot(
         labels['cls_targets_%d' % level],
@@ -262,10 +280,10 @@ def detection_loss(cls_outputs, box_outputs, labels, params):
         gamma=params['gamma'])
     if params['data_format'] == 'channels_first':
       cls_loss = tf.reshape(cls_loss,
-                          [bs, -1, width, height, params['num_classes']])
+                            [bs, -1, width, height, params['num_classes']])
     else:
       cls_loss = tf.reshape(cls_loss,
-                          [bs, width, height, -1, params['num_classes']])
+                            [bs, width, height, -1, params['num_classes']])
     cls_loss *= tf.cast(tf.expand_dims(
         tf.not_equal(labels['cls_targets_%d' % level], -2), -1), tf.float32)
     cls_losses.append(tf.reduce_sum(cls_loss))
@@ -283,7 +301,11 @@ def detection_loss(cls_outputs, box_outputs, labels, params):
   return total_loss, cls_loss, box_loss
 
 
-def add_metric_fn_inputs(params, cls_outputs, box_outputs, metric_fn_inputs):
+def add_metric_fn_inputs(params,
+                         cls_outputs,
+                         box_outputs,
+                         metric_fn_inputs,
+                         max_detection_points=anchors.MAX_DETECTION_POINTS):
   """Selects top-k predictions and adds the selected to metric_fn_inputs.
 
   Args:
@@ -295,12 +317,17 @@ def add_metric_fn_inputs(params, cls_outputs, box_outputs, metric_fn_inputs):
       representing box regression targets in
       [batch_size, height, width, num_anchors * 4].
     metric_fn_inputs: a dictionary that will hold the top-k selections.
+    max_detection_points: an integer specifing the maximum detection points to
+      keep before NMS. Keep all anchors if max_detection_points <= 0.
   """
   num_classes = params['num_classes']
   cls_outputs_all = []
   box_outputs_all = []
   # Concatenates class and box of all levels into one tensor.
   for level in range(params['min_level'], params['max_level'] + 1):
+    if params['data_format'] == 'channels_first':
+      cls_outputs[level] = tf.transpose(cls_outputs[level], [0, 2, 3, 1])
+      box_outputs[level] = tf.transpose(box_outputs[level], [0, 2, 3, 1])
     cls_outputs_all.append(tf.reshape(
         cls_outputs[level],
         [params['batch_size'], -1, num_classes]))
@@ -309,17 +336,33 @@ def add_metric_fn_inputs(params, cls_outputs, box_outputs, metric_fn_inputs):
   cls_outputs_all = tf.concat(cls_outputs_all, 1)
   box_outputs_all = tf.concat(box_outputs_all, 1)
 
-  cls_outputs_all_reshape = tf.reshape(cls_outputs_all, [params['batch_size'], -1])
-  _, cls_topk_indices = tf.math.top_k(cls_outputs_all_reshape,
-                                      k=anchors.MAX_DETECTION_POINTS,
-                                      sorted=False)
-  indices = cls_topk_indices // num_classes
-  classes = cls_topk_indices % num_classes
-  cls_indices = tf.stack([indices, classes], axis=2)
-  cls_outputs_all_after_topk = tf.gather_nd(
-      cls_outputs_all, cls_indices, batch_dims=1)
-  box_outputs_all_after_topk = tf.gather_nd(
-      box_outputs_all, tf.expand_dims(indices, 2), batch_dims=1)
+  if max_detection_points > 0:
+    # Prune anchors and detections to only keep max_detection_points.
+    # Due to some issues, top_k is currently slow in graph model.
+    cls_outputs_all_reshape = tf.reshape(cls_outputs_all,
+                                         [params['batch_size'], -1])
+    _, cls_topk_indices = tf.math.top_k(cls_outputs_all_reshape,
+                                        k=anchors.MAX_DETECTION_POINTS,
+                                        sorted=False)
+    indices = cls_topk_indices // num_classes
+    classes = cls_topk_indices % num_classes
+    cls_indices = tf.stack([indices, classes], axis=2)
+    cls_outputs_all_after_topk = tf.gather_nd(
+        cls_outputs_all, cls_indices, batch_dims=1)
+    box_outputs_all_after_topk = tf.gather_nd(
+        box_outputs_all, tf.expand_dims(indices, 2), batch_dims=1)
+  else:
+    # Keep all anchors, but for each anchor, just keep the max probablity for
+    # each class.
+    cls_outputs_idx = tf.math.argmax(cls_outputs_all, axis=-1)
+    num_anchors = cls_outputs_all.shape[1]
+
+    classes = cls_outputs_idx
+    indices = tf.reshape(
+        tf.tile(tf.range(num_anchors), [params['batch_size']]),
+        [-1, num_anchors])
+    cls_outputs_all_after_topk = tf.reduce_max(cls_outputs_all, -1)
+    box_outputs_all_after_topk = box_outputs_all
 
   metric_fn_inputs['cls_outputs_all'] = cls_outputs_all_after_topk
   metric_fn_inputs['box_outputs_all'] = box_outputs_all_after_topk
@@ -540,7 +583,7 @@ def _model_fn(features, labels, mode, params, model, variable_filter_fn=None):
     if params.get('ckpt') and params.get('backbone_ckpt'):
       raise RuntimeError(
           '--backbone_ckpt and --checkpoint are mutually exclusive')
-    elif params.get('backbone_ckpt'):
+    if params.get('backbone_ckpt'):
       var_scope = params['backbone_name'] + '/'
       if params['ckpt_var_scope'] is None:
         # Use backbone name as default checkpoint scope.
@@ -608,17 +651,15 @@ def get_model_arch(model_name='efficientdet-d0'):
   """Get model architecture for a given model name."""
   if 'retinanet' in model_name:
     return retinanet_arch.retinanet
-  elif 'efficientdet' in model_name:
+  if 'efficientdet' in model_name:
     return efficientdet_arch.efficientdet
-  else:
-    raise ValueError('Invalide model name {}'.format(model_name))
+  raise ValueError('Invalide model name {}'.format(model_name))
 
 
 def get_model_fn(model_name='efficientdet-d0'):
   """Get model fn for a given model name."""
   if 'retinanet' in model_name:
     return retinanet_model_fn
-  elif 'efficientdet' in model_name:
+  if 'efficientdet' in model_name:
     return efficientdet_model_fn
-  else:
-    raise ValueError('Invalide model name {}'.format(model_name))
+  raise ValueError('Invalide model name {}'.format(model_name))
