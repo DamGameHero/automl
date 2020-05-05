@@ -69,6 +69,51 @@ class UtilsTest(tf.test.TestCase):
     self.assertTrue(tf.io.gfile.exists(os.path.join(model_dir, 'archive')))
     self.assertTrue(tf.io.gfile.exists(os.path.join(model_dir, 'backup')))
 
+  def test_image_size(self):
+    self.assertEqual(utils.parse_image_size('1280x640'), (640, 1280))
+    self.assertEqual(utils.parse_image_size(1280), (1280, 1280))
+    self.assertEqual(utils.parse_image_size((1280, 640)), (1280, 640))
+
+  def test_get_feat_sizes(self):
+    feats = utils.get_feat_sizes(640, 2)
+    self.assertEqual(feats, [{
+        'height': 640,
+        'width': 640
+    }, {
+        'height': 320,
+        'width': 320
+    }, {
+        'height': 160,
+        'width': 160
+    }])
+
+    feats = utils.get_feat_sizes((640, 300), 2)
+    self.assertEqual(feats, [{
+        'height': 640,
+        'width': 300,
+    }, {
+        'height': 320,
+        'width': 150,
+    }, {
+        'height': 160,
+        'width': 75,
+    }])
+
+  def test_precision_float16(self):
+    def _model(inputs):
+      x = tf.ones((4, 4, 4, 4), dtype='float32')
+      conv = tf.keras.layers.Conv2D(filters=4, kernel_size=2, use_bias=False)
+      a = tf.Variable(1.0)
+      return tf.cast(a, inputs.dtype) * conv(x) * inputs
+
+    x = tf.constant(2.0, dtype=tf.float32)  # input can be any type.
+    out = utils.build_model_with_precision('mixed_float16', _model, x)
+    # Variables should be float32.
+    for v in tf.global_variables():
+      self.assertIn(v.dtype, (tf.float32, tf.dtypes.as_dtype('float32_ref')))
+    self.assertIs(out.dtype, tf.float16)  # output should be float16.
+
 
 if __name__ == '__main__':
+  tf.disable_eager_execution()
   tf.test.main()

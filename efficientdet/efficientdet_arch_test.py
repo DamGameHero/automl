@@ -38,12 +38,11 @@ class EfficientDetArchTest(tf.test.TestCase):
       inputs_shape = [1, 3, isize[0], isize[1]]
     else:
       inputs_shape = [1, isize[0], isize[1], 3]
-    inputs = tf.placeholder(tf.float32, name='input', shape=inputs_shape)
+    inputs = tf.ones(shape=inputs_shape, name='input', dtype=tf.float32)
     efficientdet_arch.efficientdet(
         inputs,
         model_name=model_name,
         is_training_bn=is_training,
-        use_bfloat16=False,
         image_size=isize,
         data_format=data_format)
     return utils.num_params_flops(False)
@@ -94,6 +93,48 @@ class EfficientDetArchTest(tf.test.TestCase):
                              self.build_model('efficientdet-d7', 1536))
 
 
+class EfficientDetArchPrecisionTest(tf.test.TestCase):
+
+  def build_model(self, features, is_training, precision):
+    def _model_fn(inputs):
+      return efficientdet_arch.efficientdet(
+          inputs,
+          model_name='efficientdet-d0',
+          is_training_bn=is_training,
+          precision=precision,
+          image_size=512)
+
+    return utils.build_model_with_precision(precision, _model_fn, features)
+
+  def test_float16(self):
+    inputs = tf.ones(shape=[1, 512, 512, 3], name='input', dtype=tf.float32)
+    cls_out, _ = self.build_model(inputs, True, 'mixed_float16')
+    for v in tf.global_variables():
+      # All variables should be float32.
+      self.assertIn(v.dtype, (tf.float32, tf.dtypes.as_dtype('float32_ref')))
+
+    for v in cls_out.values():
+      self.assertIs(v.dtype, tf.float16)
+
+  def test_bfloat16(self):
+    inputs = tf.ones(shape=[1, 512, 512, 3], name='input', dtype=tf.float32)
+    cls_out, _ = self.build_model(inputs, True, 'mixed_bfloat16')
+    for v in tf.global_variables():
+      # All variables should be float32.
+      self.assertIn(v.dtype, (tf.float32, tf.dtypes.as_dtype('float32_ref')))
+    for v in cls_out.values():
+      self.assertEqual(v.dtype, tf.bfloat16)
+
+  def test_float32(self):
+    inputs = tf.ones(shape=[1, 512, 512, 3], name='input', dtype=tf.float32)
+    cls_out, _ = self.build_model(inputs, True, 'float32')
+    for v in tf.global_variables():
+      # All variables should be float32.
+      self.assertIn(v.dtype, (tf.float32, tf.dtypes.as_dtype('float32_ref')))
+    for v in cls_out.values():
+      self.assertEqual(v.dtype, tf.float32)
+
+
 class BackboneTest(tf.test.TestCase):
 
   def test_backbone_feats(self):
@@ -103,6 +144,21 @@ class BackboneTest(tf.test.TestCase):
     self.assertEqual(list(feats.keys()), [0, 1, 2, 3, 4, 5])
     self.assertEqual(feats[0].shape, [4, 224, 224, 3])
     self.assertEqual(feats[5].shape, [4, 7, 7, 320])
+
+
+class FreezeTest(tf.test.TestCase):
+
+  def test_freeze(self):
+    var_list = [tf.Variable(0., name='efficientnet'),
+                tf.Variable(0., name='fpn_cells'),
+                tf.Variable(0., name='class_net')]
+    freeze_var_list = efficientdet_arch.freeze_vars(var_list, None)
+    self.assertEqual(len(freeze_var_list), 3)
+    freeze_var_list = efficientdet_arch.freeze_vars(var_list, 'efficientnet')
+    self.assertEqual(len(freeze_var_list), 2)
+    freeze_var_list = efficientdet_arch.freeze_vars(var_list,
+                                                    '(efficientnet|fpn_cells)')
+    self.assertEqual(len(freeze_var_list), 1)
 
 
 class BiFPNTest(tf.test.TestCase):
@@ -133,4 +189,5 @@ class BiFPNTest(tf.test.TestCase):
 
 
 if __name__ == '__main__':
+  tf.disable_eager_execution()
   tf.test.main()

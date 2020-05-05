@@ -19,6 +19,7 @@ from __future__ import division
 # gtype import
 from __future__ import print_function
 
+import contextlib
 import os
 import re
 from absl import logging
@@ -43,12 +44,6 @@ def activation_fn(features: tf.Tensor, act_type: Text):
     return tf.nn.relu6(features)
   else:
     raise ValueError('Unsupported act_type {}'.format(act_type))
-
-
-class DepthwiseConv2D(tf.keras.layers.DepthwiseConv2D, tf.layers.Layer):
-  """Wrap keras DepthwiseConv2D to tf.layers."""
-
-  pass
 
 
 def get_ema_vars():
@@ -167,11 +162,12 @@ def get_ckpt_var_map_ema(ckpt_path, ckpt_scope, var_scope, var_exclude_expr):
   return var_map
 
 
-class TpuBatchNormalization(tf.layers.BatchNormalization):
-  # class TpuBatchNormalization(tf.layers.BatchNormalization):
+class TpuBatchNormalization(tf.keras.layers.BatchNormalization):
   """Cross replica batch normalization."""
 
   def __init__(self, fused=False, **kwargs):
+    if not kwargs.get('name', None):
+      kwargs['name'] = 'tpu_batch_normalization'
     if fused in (True, None):
       raise ValueError('TpuBatchNormalization does not support fused=True.')
     super(TpuBatchNormalization, self).__init__(fused=fused, **kwargs)
@@ -216,14 +212,28 @@ class TpuBatchNormalization(tf.layers.BatchNormalization):
     else:
       return (shard_mean, shard_variance)
 
+  def call(self, *args, **kwargs):
+    outputs = super(TpuBatchNormalization, self).call(*args, **kwargs)
+    # A temporary hack for tf1 compatibility with keras batch norm.
+    for u in self.updates:
+      tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, u)
+    return outputs
 
-class BatchNormalization(tf.layers.BatchNormalization):
+
+class BatchNormalization(tf.keras.layers.BatchNormalization):
   """Fixed default name of BatchNormalization to match TpuBatchNormalization."""
 
   def __init__(self, **kwargs):
     if not kwargs.get('name', None):
       kwargs['name'] = 'tpu_batch_normalization'
     super(BatchNormalization, self).__init__(**kwargs)
+
+  def call(self, *args, **kwargs):
+    outputs = super(BatchNormalization, self).call(*args, **kwargs)
+    # A temporary hack for tf1 compatibility with keras batch norm.
+    for u in self.updates:
+      tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, u)
+    return outputs
 
 
 def batch_norm_class(is_training, use_tpu=False,):
@@ -331,10 +341,19 @@ conv_kernel_initializer = tf.initializers.variance_scaling()
 dense_kernel_initializer = tf.initializers.variance_scaling()
 
 
+class Pair(tuple):
+
+  def __new__(cls, name, value):
+    return super(Pair, cls).__new__(cls, (name, value))
+
+  def __init__(self, name, _):  # pylint: disable=super-init-not-called
+    self.name = name
+
+
 def scalar(name, tensor):
   """Stores a (name, Tensor) tuple in a custom collection."""
-  logging.info('Adding summary {}'.format((name, tensor)))
-  tf.add_to_collection('edsummaries', (name, tf.reduce_mean(tensor)))
+  logging.info('Adding summary {}'.format(Pair(name, tensor)))
+  tf.add_to_collection('edsummaries', Pair(name, tf.reduce_mean(tensor)))
 
 
 def get_scalar_summaries():
@@ -420,13 +439,127 @@ def archive_ckpt(ckpt_eval, ckpt_objective, ckpt_path):
   return True
 
 
-def get_feat_sizes(image_size: Union[int, Tuple[int, int]], max_level: int):
-  """Get feat widths and heights for all levels."""
+def parse_image_size(image_size: Union[Text, int, Tuple[int, int]]):
+  """Parse the image size and return (height, width).
+
+  Args:
+    image_size: A integer, a tuple (H, W), or a string with HxW format.
+
+  Returns:
+    A tuple of integer (height, width).
+  """
   if isinstance(image_size, int):
-    image_size = (image_size, image_size)
+    # image_size is integer, with the same width and height.
+    return (image_size, image_size)
+
+  if isinstance(image_size, str):
+    # image_size is a string with format WxH
+    width, height = image_size.lower().split('x')
+    return (int(height), int(width))
+
+  if isinstance(image_size, tuple):
+    return image_size
+
+  raise ValueError('image_size must be an int, WxH string, or (height, width)'
+                   'tuple. Was %r' % image_size)
+
+
+def get_feat_sizes(image_size: Union[Text, int, Tuple[int, int]],
+                   max_level: int):
+  """Get feat widths and heights for all levels.
+
+  Args:
+    image_size: A integer, a tuple (H, W), or a string with HxW format.
+    max_level: maximum feature level.
+
+  Returns:
+    feat_sizes: a list of tuples (height, width) for each level.
+  """
+  image_size = parse_image_size(image_size)
   feat_sizes = [{'height': image_size[0], 'width': image_size[1]}]
   feat_size = image_size
   for _ in range(1, max_level + 1):
     feat_size = ((feat_size[0] - 1) // 2 + 1, (feat_size[1] - 1) // 2 + 1)
     feat_sizes.append({'height': feat_size[0], 'width': feat_size[1]})
   return feat_sizes
+
+
+@contextlib.contextmanager
+def float16_scope():
+  """Scope class for float16."""
+
+  def _custom_getter(getter, *args, **kwargs):
+    """Returns a custom getter that methods must be called under."""
+    cast_to_float16 = False
+    requested_dtype = kwargs['dtype']
+    if requested_dtype == tf.float16:
+      kwargs['dtype'] = tf.float32
+      cast_to_float16 = True
+    var = getter(*args, **kwargs)
+    if cast_to_float16:
+      var = tf.cast(var, tf.float16)
+    return var
+
+  with tf.variable_scope('', custom_getter=_custom_getter) as varscope:
+    yield varscope
+
+
+def set_precision_policy(policy_name: Text = 'float32'):
+  """Set precision policy according to the name.
+
+  Args:
+    policy_name: precision policy name, one of 'float32', 'mixed_float16',
+      'mixed_bfloat16', or None.
+  """
+  if not policy_name or policy_name == 'float32':
+    return
+
+  assert policy_name in ('mixed_float16', 'mixed_bfloat16')
+  logging.info('use mixed precision policy name %s', policy_name)
+  # TODO(tanmingxing): use tf.keras.layers.enable_v2_dtype_behavior() when it
+  # available in stable TF release.
+  from tensorflow.python.keras.engine import base_layer_utils  # pylint: disable=g-import-not-at-top,g-direct-tensorflow-import
+  base_layer_utils.enable_v2_dtype_behavior()
+  # mixed_float16 training is not supported for now, so disable loss_scale.
+  # float32 and mixed_bfloat16 do not need loss scale for training.
+  policy = tf2.keras.mixed_precision.experimental.Policy(
+      policy_name, loss_scale=None)
+  tf2.keras.mixed_precision.experimental.set_policy(policy)
+
+
+def build_model_with_precision(pp, mm, ii, *args, **kwargs):
+  """Build model with its inputs/params for a specified precision context.
+
+  This is highly specific to this codebase, and not intended to be general API.
+  Advanced users only. DO NOT use it if you don't know what it does.
+  NOTE: short argument names are intended to avoid conficts with kwargs.
+
+  Args:
+    pp: A string, precision policy name, such as "mixed_float16".
+    mm: A function, for rmodel builder.
+    ii: A tensor, for model inputs.
+    *args: A list of model arguments.
+    **kwargs: A dict, extra model parameters.
+
+  Returns:
+    the output of mm model.
+  """
+  if pp == 'mixed_bfloat16':
+    set_precision_policy(pp)
+    inputs = tf.cast(ii, tf.bfloat16)
+    with tf.tpu.bfloat16_scope():
+      outputs = mm(inputs, *args, **kwargs)
+    set_precision_policy('float32')
+  elif pp == 'mixed_float16':
+    set_precision_policy(pp)
+    inputs = tf.cast(ii, tf.float16)
+    with float16_scope():
+      outputs = mm(inputs, *args, **kwargs)
+    set_precision_policy('float32')
+  elif not pp or pp == 'float32':
+    outputs = mm(ii, *args, **kwargs)
+  else:
+    raise ValueError('Unknow precision name {}'.format(pp))
+
+  # Users are responsible to convert the dtype of all outputs.
+  return outputs

@@ -25,6 +25,8 @@ from __future__ import print_function
 
 import functools
 import itertools
+import re
+
 from absl import logging
 import numpy as np
 import tensorflow.compat.v1 as tf
@@ -36,6 +38,21 @@ from backbone import efficientnet_builder
 
 
 ################################################################################
+def freeze_vars(variables, pattern):
+  """Removes backbone+fpn variables from the input.
+
+  Args:
+    variables: all the variables in training
+    pattern: a reg experession such as ".*(efficientnet|fpn_cells).*".
+
+  Returns:
+    var_list: a list containing variables for training
+  """
+  if pattern:
+    variables = [v for v in variables if not re.match(pattern, v.name)]
+  return variables
+
+
 def nearest_upsampling(data, height_scale, width_scale, data_format):
   """Nearest neighbor upsampling implementation."""
   with tf.name_scope('nearest_upsampling'):
@@ -672,6 +689,8 @@ def efficientdet(features, model_name=None, config=None, **kwargs):
 
   if not config:
     config = hparams_config.get_efficientdet_config(model_name)
+  elif isinstance(config, dict):
+    config = hparams_config.Config(config)  # wrap dict in Config object
 
   if kwargs:
     config.override(kwargs)

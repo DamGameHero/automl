@@ -99,11 +99,11 @@ def decode_box_outputs_tf(rel_codes, anchors):
   Returns:
     outputs: bounding boxes.
   """
-  ycenter_a = (anchors[0] + anchors[2]) / 2
-  xcenter_a = (anchors[1] + anchors[3]) / 2
-  ha = anchors[2] - anchors[0]
-  wa = anchors[3] - anchors[1]
-  ty, tx, th, tw = tf.unstack(rel_codes, num=4)
+  ycenter_a = (anchors[..., 0] + anchors[..., 2]) / 2
+  xcenter_a = (anchors[..., 1] + anchors[..., 3]) / 2
+  ha = anchors[..., 2] - anchors[..., 0]
+  wa = anchors[..., 3] - anchors[..., 1]
+  ty, tx, th, tw = tf.unstack(rel_codes, num=4, axis=-1)
 
   w = tf.math.exp(tw) * wa
   h = tf.math.exp(th) * ha
@@ -113,7 +113,7 @@ def decode_box_outputs_tf(rel_codes, anchors):
   xmin = xcenter - w / 2.
   ymax = ycenter + h / 2.
   xmax = xcenter + w / 2.
-  return tf.stack([ymin, xmin, ymax, xmax], axis=1)
+  return tf.stack([ymin, xmin, ymax, xmax], axis=-1)
 
 
 @tf.autograph.to_graph
@@ -310,8 +310,7 @@ def _generate_detections_tf(cls_outputs,
 
   scores = tf.math.sigmoid(cls_outputs)
   # apply bounding box regression to anchors
-  boxes = decode_box_outputs_tf(
-      tf.transpose(box_outputs, [1, 0]), tf.transpose(anchor_boxes, [1, 0]))
+  boxes = decode_box_outputs_tf(box_outputs, anchor_boxes)
 
   if use_native_nms:
     logging.info('Using native nms.')
@@ -335,7 +334,7 @@ def _generate_detections_tf(cls_outputs,
   width = boxes[:, 3] - boxes[:, 1]
 
   detections = tf.stack([
-      tf.cast(tf.repeat(image_id, tf.size(top_detection_idx)), tf.float32),
+      tf.cast(tf.tile(image_id, [tf.size(top_detection_idx)]), tf.float32),
       boxes[:, 0] * image_scale,
       boxes[:, 1] * image_scale,
       height * image_scale,
@@ -376,7 +375,6 @@ def _generate_detections(cls_outputs, box_outputs, anchor_boxes, indices,
     detections: detection results in a tensor with each row representing
       [image_id, x, y, width, height, score, class]
   """
-  logging.info('Using numpy version of post-processing.')
   anchor_boxes = anchor_boxes[indices, :]
   scores = sigmoid(cls_outputs)
   # apply bounding box regression to anchors
