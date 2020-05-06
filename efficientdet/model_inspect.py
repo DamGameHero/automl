@@ -72,6 +72,8 @@ flags.DEFINE_float('min_score_thresh', None, 'Score threshold to show box.')
 flags.DEFINE_string('saved_model_dir', '/tmp/saved_model',
                     'Folder path for saved model.')
 
+flags.DEFINE_bool('big_image', False, 'Whether to delete logdir.')
+
 FLAGS = flags.FLAGS
 
 
@@ -156,23 +158,60 @@ class ModelInspector(object):
         model_params=self.model_config.as_dict(),
         **kwargs)
     driver.load(self.saved_model_dir)
+    # print(self.model_config.image_size)
 
     # Serving time batch size should be fixed.
     batch_size = self.batch_size or 1
     all_files = list(tf.io.gfile.glob(image_path_pattern))
     print('all_files=', all_files)
-    num_batches = len(all_files) // batch_size
+    if not FLAGS.big_image:
+        num_batches = len(all_files) // batch_size
 
-    for i in range(num_batches):
-      batch_files = all_files[i * batch_size: (i + 1) * batch_size]
-      raw_images = [np.array(Image.open(f)) for f in batch_files]
-      detections_bs = driver.serve_images(raw_images)
-      for j in range(len(raw_images)):
-        img = driver.visualize(raw_images[j], detections_bs[j], **kwargs)
-        img_id = str(i * batch_size + j)
-        output_image_path = os.path.join(output_dir, img_id + '.jpg')
-        Image.fromarray(img).save(output_image_path)
-        logging.info('writing file to %s', output_image_path)
+        for i in range(num_batches):
+            batch_files = all_files[i * batch_size: (i + 1) * batch_size]
+            raw_images = [np.array(Image.open(f)) for f in batch_files]
+            detections_bs = driver.serve_images(raw_images)
+            for j in range(len(raw_images)):
+                img = driver.visualize(raw_images[j], detections_bs[j], **kwargs)
+                img_id = str(i * batch_size + j)
+                output_image_path = os.path.join(output_dir, img_id + '.jpg')
+                Image.fromarray(img).save(output_image_path)
+                logging.info('writing file to %s', output_image_path)
+    else:
+        for f in all_files:
+            with Image.open(f) as im:
+                img_name = os.path.basename(f)
+                image_width = im.width
+                image_height = im.height
+                imagette_width = self.model_config.image_size[0]
+                imagette_height = self.model_config.image_size[1]
+                divx = round(int(image_width)/imagette_width)
+                divy = round(int(image_height)/imagette_height)
+                size = (imagette_width*divx, imagette_height*divy)
+                im_resized = im.resize(size)
+                imagettes = []
+                eval_image = Image.new('RGB', size)
+                for x in range(divx):
+                    for y in range(divy):
+                        imagettes = [(np.array(im_resized.crop((x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))))]
+                        # driver.batch_size = len(imagettes)
+                        detections_bs = driver.serve_images(imagettes)
+                        eval_imagette = driver.visualize(imagettes[0], detections_bs[0], **kwargs)
+                        eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
+                # for i in range(0, im_resized.width + 1, imagette_width):
+                # for j in range(0, im_resized.height + 1, imagette_height):
+                # print(len(imagettes))
+                # print(len(detections_bs))
+                # for x in range(divx):
+                    # for y in range(divy):
+                        # eval_imagette = driver.visualize(imagettes[k], detections_bs[k], **kwargs)
+                        # eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
+                        # k = +1
+                    # img_id = str(i * batch_size + j)
+                output_image_path = os.path.join(output_dir, img_name[:-4] + '_eval.jpg')
+                eval_image.save(output_image_path)
+                logging.info('writing file to %s', output_image_path)
+
 
   def saved_model_benchmark(self,
                             image_path_pattern,
