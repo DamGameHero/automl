@@ -321,6 +321,10 @@ def det_post_process(params: Dict[Any, Any], cls_outputs: Dict[int, tf.Tensor],
         min_score_thresh=min_score_thresh,
         max_boxes_to_draw=max_boxes_to_draw,
         disable_pyfun=params.get('disable_pyfun'))
+    if params['batch_size'] > 1:
+      # pad to fixed length if batch size > 1.
+      padding_size = max_boxes_to_draw - tf.shape(detections)[0]
+      detections = tf.pad(detections, [[0, padding_size], [0, 0]])
     detections_batch.append(detections)
   return tf.stack(detections_batch, name='detections')
 
@@ -681,7 +685,21 @@ class ServingDriver(object):
         self.sess, self.sess.graph_def, output_names)
     return graphdef
 
-  def export(self, output_dir):
+  def to_tflite(self, saved_model_dir):
+    """Convert to tflite."""
+    input_name = self.signitures['image_arrays'].op.name
+    input_shapes = {input_name: [None, *self.params['image_size'], 3]}
+    converter = tf.lite.TFLiteConverter.from_saved_model(
+        saved_model_dir,
+        input_arrays=[input_name],
+        input_shapes=input_shapes,
+        output_arrays=[self.signitures['prediction'].op.name])
+    converter.experimental_new_converter = True
+    supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+    converter.target_spec.supported_ops = supported_ops
+    return converter.convert()
+
+  def export(self, output_dir, frozen_pb=True, tflite_path=None):
     """Export a saved model."""
     signitures = self.signitures
     signature_def_map = {
@@ -705,10 +723,19 @@ class ServingDriver(object):
     logging.info('Model saved at %s', output_dir)
 
     # also save freeze pb file.
-    graphdef = self.freeze()
-    pb_path = os.path.join(output_dir, self.model_name + '_frozen.pb')
-    tf.io.gfile.GFile(pb_path, 'wb').write(graphdef.SerializeToString())
-    logging.info('Free graph saved at %s', pb_path)
+    if frozen_pb:
+      graphdef = self.freeze()
+      pb_path = os.path.join(output_dir, self.model_name + '_frozen.pb')
+      tf.io.gfile.GFile(pb_path, 'wb').write(graphdef.SerializeToString())
+      logging.info('Free graph saved at %s', pb_path)
+
+    if tflite_path:
+      ver = tf.__version__
+      if ver < '2.2.0-dev20200501' or ('dev' not in ver and ver < '2.2.0-rc4'):
+        raise ValueError('TFLite requires TF 2.2.0rc4 or laterr version.')
+      tflite_model = self.to_tflite(output_dir)
+      with tf.io.gfile.GFile(tflite_path, 'wb') as f:
+        f.write(tflite_model)
 
 
 class InferenceDriver(object):

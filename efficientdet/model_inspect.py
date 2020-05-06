@@ -71,6 +71,7 @@ flags.DEFINE_float('min_score_thresh', None, 'Score threshold to show box.')
 # For saved model.
 flags.DEFINE_string('saved_model_dir', '/tmp/saved_model',
                     'Folder path for saved model.')
+flags.DEFINE_string('tflite_path', None, 'Path for exporting tflite file.')
 
 flags.DEFINE_bool('big_image', False, 'Whether to delete logdir.')
 
@@ -88,6 +89,7 @@ class ModelInspector(object):
                ckpt_path: Text = None,
                export_ckpt: Text = None,
                saved_model_dir: Text = None,
+               tflite_path: Text = None,
                batch_size: int = 1,
                hparams: Text = ''):
     self.model_name = model_name
@@ -97,6 +99,7 @@ class ModelInspector(object):
     self.ckpt_path = ckpt_path
     self.export_ckpt = export_ckpt
     self.saved_model_dir = saved_model_dir
+    self.tflite_path = tflite_path
 
     model_config = hparams_config.get_detection_config(model_name)
     model_config.override(hparams)  # Add custom overrides
@@ -106,11 +109,11 @@ class ModelInspector(object):
     self.batch_size = batch_size or None
     self.labels_shape = [batch_size, model_config.num_classes]
 
-    width, height = model_config.image_size
+    height, width = model_config.image_size
     if model_config.data_format == 'channels_first':
-      self.inputs_shape = [batch_size, 3, width, height]
+      self.inputs_shape = [batch_size, 3, height, width]
     else:
-      self.inputs_shape = [batch_size, width, height, 3]
+      self.inputs_shape = [batch_size, height, width, 3]
 
     self.model_config = model_config
 
@@ -146,7 +149,7 @@ class ModelInspector(object):
         model_params=self.model_config.as_dict(),
         **kwargs)
     driver.build()
-    driver.export(self.saved_model_dir)
+    driver.export(self.saved_model_dir, tflite_path=self.tflite_path)
 
   def saved_model_inference(self, image_path_pattern, output_dir, **kwargs):
     """Perform inference for the given saved model."""
@@ -211,7 +214,6 @@ class ModelInspector(object):
                 output_image_path = os.path.join(output_dir, img_name[:-4] + '_eval.jpg')
                 eval_image.save(output_image_path)
                 logging.info('writing file to %s', output_image_path)
-
 
   def saved_model_benchmark(self,
                             image_path_pattern,
@@ -491,6 +493,7 @@ def main(argv):
       ckpt_path=FLAGS.ckpt_path,
       export_ckpt=FLAGS.export_ckpt,
       saved_model_dir=FLAGS.saved_model_dir,
+      tflite_path=FLAGS.tflite_path,
       batch_size=FLAGS.batch_size,
       hparams=FLAGS.hparams)
   inspector.run_model(
