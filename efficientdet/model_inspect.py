@@ -22,6 +22,7 @@ from __future__ import print_function
 import os
 import time
 
+from absl import app
 from absl import flags
 from absl import logging
 
@@ -33,7 +34,7 @@ from typing import Text, Tuple, List
 import hparams_config
 import inference
 import utils
-
+from tensorflow.python.client import timeline  # pylint: disable=g-direct-tensorflow-import
 
 flags.DEFINE_string('model_name', 'efficientdet-d0', 'Model.')
 flags.DEFINE_string('logdir', '/tmp/deff/', 'log directory.')
@@ -117,7 +118,8 @@ class ModelInspector(object):
 
     self.model_config = model_config
 
-  def build_model(self, inputs: tf.Tensor,
+  def build_model(self,
+                  inputs: tf.Tensor,
                   is_training: bool = False) -> List[tf.Tensor]:
     """Build model with inputs and labels and print out model stats."""
     logging.info('start building model')
@@ -126,9 +128,6 @@ class ModelInspector(object):
         inputs,
         is_training_bn=is_training,
         config=self.model_config)
-
-    print('backbone+fpn+box params/flops = {:.6f}M, {:.9f}B'.format(
-        *utils.num_params_flops()))
 
     # Write to tfevent for tensorboard.
     train_writer = tf.summary.FileWriter(self.logdir)
@@ -194,11 +193,14 @@ class ModelInspector(object):
                 im_resized = im.resize(size)
                 imagettes = []
                 eval_image = Image.new('RGB', size)
+                eval_time = 0
                 for x in range(divx):
                     for y in range(divy):
                         imagettes = [(np.array(im_resized.crop((x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))))]
                         # driver.batch_size = len(imagettes)
+                        start = time.time()
                         detections_bs = driver.serve_images(imagettes)
+                        eval_time += time.time() - start
                         eval_imagette = driver.visualize(imagettes[0], detections_bs[0], **kwargs)
                         eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
                 # for i in range(0, im_resized.width + 1, imagette_width):
@@ -211,7 +213,8 @@ class ModelInspector(object):
                         # eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
                         # k = +1
                     # img_id = str(i * batch_size + j)
-                output_image_path = os.path.join(output_dir, img_name[:-4] + '_eval.jpg')
+                print("EfficientDet detection in %s seconds ---" % (eval_time))
+                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_eval.jpg')
                 eval_image.save(output_image_path)
                 logging.info('writing file to %s', output_image_path)
 
@@ -254,8 +257,9 @@ class ModelInspector(object):
     out_ptr = None
     if output_video:
       frame_width, frame_height = int(cap.get(3)), int(cap.get(4))
-      out_ptr = cv2.VideoWriter(output_video, cv2.VideoWriter_fourcc(
-          'm', 'p', '4', 'v'), 25, (frame_width, frame_height))
+      out_ptr = cv2.VideoWriter(output_video,
+                                cv2.VideoWriter_fourcc('m', 'p', '4', 'v'), 25,
+                                (frame_width, frame_height))
 
     while cap.isOpened():
       # Capture frame-by-frame
@@ -349,7 +353,10 @@ class ModelInspector(object):
 
     return graphdef
 
-  def benchmark_model(self, warmup_runs, bm_runs, num_threads,
+  def benchmark_model(self,
+                      warmup_runs,
+                      bm_runs,
+                      num_threads,
                       trace_filename=None):
     """Benchmark model."""
     if self.tensorrt:
@@ -399,7 +406,7 @@ class ModelInspector(object):
       for i in range(warmup_runs):
         start_time = time.time()
         sess.run(output_name, feed_dict={input_name: img})
-        print('Warm up: {} {:.4f}s'.format(i, time.time() - start_time))
+        logging.info('Warm up: {} {:.4f}s'.format(i, time.time() - start_time))
 
       print('Start benchmark runs total={}'.format(bm_runs))
       start = time.perf_counter()
@@ -414,17 +421,18 @@ class ModelInspector(object):
         run_options = tf.RunOptions()
         run_options.trace_level = tf.RunOptions.FULL_TRACE
         run_metadata = tf.RunMetadata()
-        sess.run(output_name, feed_dict={input_name: img},
-                 options=run_options, run_metadata=run_metadata)
+        sess.run(
+            output_name,
+            feed_dict={input_name: img},
+            options=run_options,
+            run_metadata=run_metadata)
         logging.info('Dumping trace to %s', trace_filename)
         trace_dir = os.path.dirname(trace_filename)
         if not tf.io.gfile.exists(trace_dir):
           tf.io.gfile.makedirs(trace_dir)
         with tf.io.gfile.GFile(trace_filename, 'w') as trace_file:
-          from tensorflow.python.client import timeline  # pylint: disable=g-direct-tensorflow-import,g-import-not-at-top
           trace = timeline.Timeline(step_stats=run_metadata.step_stats)
-          trace_file.write(
-              trace.generate_chrome_trace_format(show_memory=True))
+          trace_file.write(trace.generate_chrome_trace_format(show_memory=True))
 
   def convert_tr(self, graph_def, fetches):
     """Convert to TensorRT."""
@@ -462,25 +470,25 @@ class ModelInspector(object):
       if runmode == 'saved_model':
         self.export_saved_model(**config_dict)
       elif runmode == 'infer':
-        self.inference_single_image(
-            kwargs['input_image'], kwargs['output_image_dir'], **config_dict)
+        self.inference_single_image(kwargs['input_image'],
+                                    kwargs['output_image_dir'], **config_dict)
       elif runmode == 'saved_model_infer':
-        self.saved_model_inference(
-            kwargs['input_image'], kwargs['output_image_dir'], **config_dict)
+        self.saved_model_inference(kwargs['input_image'],
+                                   kwargs['output_image_dir'], **config_dict)
       elif runmode == 'saved_model_video':
-        self.saved_model_video(
-            kwargs['input_video'], kwargs['output_video'], **config_dict)
+        self.saved_model_video(kwargs['input_video'], kwargs['output_video'],
+                               **config_dict)
     elif runmode == 'bm':
-      self.benchmark_model(warmup_runs=5, bm_runs=kwargs.get('bm_runs', 10),
-                           num_threads=kwargs.get('threads', 0),
-                           trace_filename=kwargs.get('trace_filename', None))
+      self.benchmark_model(
+          warmup_runs=5,
+          bm_runs=kwargs.get('bm_runs', 10),
+          num_threads=kwargs.get('threads', 0),
+          trace_filename=kwargs.get('trace_filename', None))
+    else:
+      raise ValueError('Unkown runmode {}'.format(runmode))
 
 
-def main(argv):
-  assert len(argv) >= 1
-  if len(argv) > 1:  # Do not accept unknown args.
-    raise ValueError('Received unknown arguments: {}'.format(argv[1:]))
-
+def main(_):
   if tf.io.gfile.exists(FLAGS.logdir) and FLAGS.delete_logdir:
     logging.info('Deleting log dir ...')
     tf.io.gfile.rmtree(FLAGS.logdir)
@@ -513,4 +521,4 @@ def main(argv):
 if __name__ == '__main__':
   logging.set_verbosity(logging.WARNING)
   tf.disable_eager_execution()
-  tf.app.run(main)
+  app.run(main)

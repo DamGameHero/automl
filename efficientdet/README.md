@@ -14,6 +14,8 @@ Updates:
 
 **Quick start tutorial: [tutorial.ipynb](tutorial.ipynb)**
 
+**Quick install dependencies: ```pip install -r requirements.txt```
+
 ## 1. About EfficientDet Models
 
 EfficientDets are a family of object detection models, which achieve state-of-the-art 52.6mAP on COCO test-dev, yet being 4x - 9x smaller and using 13x - 42x fewer FLOPs than previous detectors. Our models also run 2x - 4x faster on GPU, and 5x - 11x faster on CPU than other detectors.
@@ -81,7 +83,7 @@ Then you will get:
  - frozen graph with name savedmodeldir/efficientdet-d0_frozen.pb
  - tflite file with name efficientdet-d0.tflite
 
-Notably, --tflite_path is optional, and it only works with tensorflow >= 2.2.0-rc4.
+Notably, --tflite_path does not work for now. It requires some extra fixes in future TensorFlow rerlease (> 2.2.0-rc4).
 
 
 ## 4. Benchmark model latency.
@@ -304,7 +306,7 @@ If you want to do inference for custom data, you can run
       --model_name=efficientdet-d0   --ckpt_path=efficientdet-d0 \
       --hparams=voc_config.yaml  \
       --input_image=img.png --output_image_dir=/tmp/
-  
+
 You should check more details of runmode which is written in caption-4.
 
 ## 10. Training EfficientDets on TPUs.
