@@ -20,12 +20,16 @@
 
 from __future__ import absolute_import
 from __future__ import division
+# gtype import
 from __future__ import print_function
 
 import inspect
 import math
 from absl import logging
+import numpy as np
 import tensorflow.compat.v1 as tf
+import tensorflow_probability as tfp
+
 import hparams_config
 
 try:
@@ -1496,19 +1500,19 @@ def _parse_policy_info(name, prob, level, replace_value, augmentation_hparams):
   # Check to see if prob is passed into function. This is used for operations
   # where we alter bboxes independently.
   # pytype:disable=wrong-arg-types
-  if 'prob' in inspect.getargspec(func)[0]:
+  if 'prob' in inspect.getfullargspec(func)[0]:
     args = tuple([prob] + list(args))
   # pytype:enable=wrong-arg-types
 
   # Add in replace arg if it is required for the function that is being called.
-  if 'replace' in inspect.getargspec(func)[0]:
+  if 'replace' in inspect.getfullargspec(func)[0]:
     # Make sure replace is the final argument
-    assert 'replace' == inspect.getargspec(func)[0][-1]
+    assert 'replace' == inspect.getfullargspec(func)[0][-1]
     args = tuple(list(args) + [replace_value])
 
   # Add bboxes as the second positional argument for the function if it does
   # not already exist.
-  if 'bboxes' not in inspect.getargspec(func)[0]:
+  if 'bboxes' not in inspect.getfullargspec(func)[0]:
     func = bbox_wrapper(func)
   return (func, prob, args)
 
@@ -1516,11 +1520,11 @@ def _parse_policy_info(name, prob, level, replace_value, augmentation_hparams):
 def _apply_func_with_prob(func, image, args, prob, bboxes):
   """Apply `func` to image w/ `args` as input with probability `prob`."""
   assert isinstance(args, tuple)
-  assert 'bboxes' == inspect.getargspec(func)[0][1]
+  assert 'bboxes' == inspect.getfullargspec(func)[0][1]
 
   # If prob is a function argument, then this randomness is being handled
   # inside the function, so make sure it is always called.
-  if 'prob' in inspect.getargspec(func)[0]:
+  if 'prob' in inspect.getfullargspec(func)[0]:
     prob = 1.0
 
   # Apply the function with probability `prob`.
@@ -1546,8 +1550,36 @@ def select_and_apply_random_policy(policies, image, bboxes):
   return (image, bboxes)
 
 
+def select_and_apply_random_policy_augmix(policies,
+                                          image,
+                                          bboxes,
+                                          mixture_width=3,
+                                          mixture_depth=-1,
+                                          alpha=1):
+  """Select a random policy from `policies` and apply it to `image`."""
+  policy_to_select = tf.random_uniform([], maxval=len(policies), dtype=tf.int32)
+  # Note that using tf.case instead of tf.conds would result in significantly
+  # larger graphs and would even break export for some larger policies.
+  ws = tfp.distributions.Dirichlet([alpha] * mixture_width).sample()
+  m = tfp.distributions.Beta(alpha, alpha).sample()
+  mix = tf.zeros_like(image, dtype=tf.float32)
+  for j in range(mixture_width):
+    aug_image = image
+    depth = mixture_depth if mixture_depth > 0 else np.random.randint(1, 4)
+    for _ in range(depth):
+      for (i, policy) in enumerate(policies):
+        aug_image, bboxes = tf.cond(
+            tf.equal(i, policy_to_select),
+            lambda policy_fn=policy, img=aug_image: policy_fn(img, bboxes),
+            lambda img=aug_image: (img, bboxes))
+    mix += ws[j] * tf.cast(aug_image, tf.float32)
+  mixed = tf.cast((1 - m) * tf.cast(image, tf.float32) + m * mix, tf.uint8)
+  return (mixed, bboxes)
+
+
 def build_and_apply_nas_policy(policies, image, bboxes,
-                               augmentation_hparams):
+                               augmentation_hparams, use_augmix=False,
+                               mixture_width=3, mixture_depth=-1, alpha=1):
   """Build a policy from the given policies passed in and apply to image.
 
   Args:
@@ -1559,6 +1591,11 @@ def build_and_apply_nas_policy(policies, image, bboxes,
     bboxes: tf.Tensor of shape [N, 4] representing ground truth boxes that are
       normalized between [0, 1].
     augmentation_hparams: Hparams associated with the NAS learned policy.
+    use_augmix: whether use augmix[https://arxiv.org/pdf/1912.02781.pdf]
+    mixture_width: Width of augmentation chain
+    mixture_depth: Depth of augmentation chain. -1 enables stochastic depth
+      uniformly from [1, 3].
+    alpha: Probability coefficient for Beta and Dirichlet distributions.
 
   Returns:
     A version of image that now has data augmentation applied to it based on
@@ -1592,14 +1629,24 @@ def build_and_apply_nas_policy(policies, image, bboxes,
         return image_, bboxes_
       return final_policy
     tf_policies.append(make_final_policy(tf_policy))
+  if use_augmix:
+    augmented_images, augmented_bboxes = select_and_apply_random_policy_augmix(
+        tf_policies, image, bboxes, mixture_width, mixture_depth, alpha)
+  else:
+    augmented_images, augmented_bboxes = select_and_apply_random_policy(
+        tf_policies, image, bboxes)
 
-  augmented_images, augmented_bboxes = select_and_apply_random_policy(
-      tf_policies, image, bboxes)
   # If no bounding boxes were specified, then just return the images.
   return (augmented_images, augmented_bboxes)
 
 
-def distort_image_with_autoaugment(image, bboxes, augmentation_name):
+def distort_image_with_autoaugment(image,
+                                   bboxes,
+                                   augmentation_name,
+                                   use_augmix=False,
+                                   mixture_width=3,
+                                   mixture_depth=-1,
+                                   alpha=1):
   """Applies the AutoAugment policy to `image` and `bboxes`.
 
   Args:
@@ -1613,6 +1660,11 @@ def distort_image_with_autoaugment(image, bboxes, augmentation_name):
       found on the COCO dataset that have slight variation in what operations
       were used during the search procedure along with how many operations are
       applied in parallel to a single image (2 vs 3).
+    use_augmix: whether use augmix[https://arxiv.org/pdf/1912.02781.pdf]
+    mixture_width: Width of augmentation chain
+    mixture_depth: Depth of augmentation chain. -1 enables stochastic depth
+      uniformly from [1, 3].
+    alpha: Probability coefficient for Beta and Dirichlet distributions.
 
   Returns:
     A tuple containing the augmented versions of `image` and `bboxes`.
@@ -1633,4 +1685,7 @@ def distort_image_with_autoaugment(image, bboxes, augmentation_name):
       cutout_bbox_const=50,
       translate_bbox_const=120))
 
-  return build_and_apply_nas_policy(policy, image, bboxes, augmentation_hparams)
+  with tf.device('/cpu:0'):
+    return build_and_apply_nas_policy(policy, image, bboxes,
+                                      augmentation_hparams, use_augmix,
+                                      mixture_width, mixture_depth, alpha)
