@@ -194,11 +194,14 @@ class ModelInspector(object):
                 im_resized = im.resize(size)
                 imagettes = []
                 eval_image = Image.new('RGB', size)
+                eval_time = 0
                 for x in range(divx):
                     for y in range(divy):
                         imagettes = [(np.array(im_resized.crop((x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))))]
                         # driver.batch_size = len(imagettes)
+                        start = time.time()
                         detections_bs = driver.serve_images(imagettes)
+                        eval_time += time.time() - start
                         eval_imagette = driver.visualize(imagettes[0], detections_bs[0], **kwargs)
                         eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
                 # for i in range(0, im_resized.width + 1, imagette_width):
@@ -211,7 +214,8 @@ class ModelInspector(object):
                         # eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
                         # k = +1
                     # img_id = str(i * batch_size + j)
-                output_image_path = os.path.join(output_dir, img_name[:-4] + '_eval.jpg')
+                print("EfficientDet detection in %s seconds ---" % (eval_time))
+                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_eval.jpg')
                 eval_image.save(output_image_path)
                 logging.info('writing file to %s', output_image_path)
 
