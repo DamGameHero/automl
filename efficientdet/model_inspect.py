@@ -214,9 +214,10 @@ class ModelInspector(object):
                         # k = +1
                     # img_id = str(i * batch_size + j)
                 print("EfficientDet detection in %s seconds ---" % (eval_time))
-                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_eval_resized.jpg')
-                eval_image_resized = eval_image.resize(im.width, im.height)
-                eval_image_resized.save(output_image_path)
+                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_eval_2.jpg')
+                # eval_image_resized = eval_image.resize((im.width, im.height))
+                # eval_image_resized.save(output_image_path)
+                eval_image.save(output_image_path)
                 logging.info('writing file to %s', output_image_path)
 
   def saved_model_benchmark(self,
