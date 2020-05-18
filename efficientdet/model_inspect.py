@@ -158,7 +158,7 @@ class ModelInspector(object):
         batch_size=self.batch_size,
         use_xla=self.use_xla,
         model_params=self.model_config.as_dict(),
-        **kwargs)
+        **kwargs)  # put   min_score_thresh, max_boxes_to_draw, line_thickness in param here ?
     driver.load(self.saved_model_dir)
     # print(self.model_config.image_size)
 
