@@ -162,11 +162,10 @@ class ModelInspector(object):
         batch_size=self.batch_size,
         use_xla=self.use_xla,
         model_params=self.model_config.as_dict(),
-        **kwargs)  # put   min_score_thresh, max_boxes_to_draw, line_thickness in param here ?
+        **kwargs)
     driver.load(self.saved_model_dir)
-    # print(self.model_config.image_size)
 
-    # Serving time batch size should be fixed.
+    # Serving time batch size should be fixed. See new version of Google's Repo
     batch_size = self.batch_size or 1
     all_files = list(tf.io.gfile.glob(image_path_pattern))
     print('all_files=', all_files)
@@ -203,17 +202,12 @@ class ModelInspector(object):
                 for x in range(divx):
                     for y in range(divy):
                         imagettes = [(np.array(im_resized.crop((x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))))]
-                        # driver.batch_size = len(imagettes)
+                        # driver.batch_size = len(imagettes)  # TODO: handle batch size
                         start = time.time()
                         detections_bs = driver.serve_images(imagettes)
-                        # if len(detections_bs[0]) != 0:
-                            # print(detections_bs[0])
-                            # sys.exit(0)
                         eval_time += time.time() - start
                         if FLAGS.raster:
-                            raster_imagette = np.zeros(shape=(imagette_height, imagette_width))  # useless ?
                             raster_imagette2 = np.zeros(shape=(imagette_height, imagette_width))
-                            print("len = %", len(detections_bs[0]))
                             for detection_bs in detections_bs[0]:
                                 ymin = detection_bs[1]
                                 xmin = detection_bs[2]
@@ -222,35 +216,18 @@ class ModelInspector(object):
                                 raster_imagette = np.zeros(shape=(imagette_height, imagette_width))
                                 raster_imagette[int(ymin):int(ymax), int(xmin):int(xmax)] = detection_bs[5]
                                 raster_imagette2 = np.maximum(raster_imagette2, raster_imagette)
-                                # print(raster_imagette2)
-                                print(ymin)
-                                print(ymax)
-                                print(xmin)
-                                print(xmax)
-                                print(detection_bs[5])
                             raster_image[y * imagette_height:(y + 1) * imagette_height, x * imagette_width:(x+1) * imagette_width] = raster_imagette2
                         eval_imagette = driver.visualize(imagettes[0], detections_bs[0], **kwargs)
                         eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
-                # for i in range(0, im_resized.width + 1, imagette_width):
-                # for j in range(0, im_resized.height + 1, imagette_height):
-                # print(len(imagettes))
-                # print(len(detections_bs))
-                # for x in range(divx):
-                    # for y in range(divy):
-                        # eval_imagette = driver.visualize(imagettes[k], detections_bs[k], **kwargs)
-                        # eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
-                        # k = +1
-                    # img_id = str(i * batch_size + j)
                 print("EfficientDet detection in %s seconds ---" % (eval_time))
                 if FLAGS.raster:
-                    raster_image = (raster_image > 0.1) * raster_image * 255  # get threshold detection
+                    raster_image = (raster_image > driver.min_score_thresh) * raster_image * 255
                     raster_image = raster_image.astype(np.uint8)
-                    output_raster_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_TEST_RASTER.png')
+                    output_raster_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_detection_raster.png')
                     ras_img = Image.fromarray(raster_image)
                     ras_img2 = ras_img.resize(im.size)
                     ras_img2.save(output_raster_path, "PNG")
-                # output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_detection.jpg')
-                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_TEST.jpg')
+                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_detection.jpg')
                 eval_image_resized = eval_image.resize((im.width, im.height))
                 eval_image_resized.save(output_image_path)
                 logging.info('writing file to %s', output_image_path)

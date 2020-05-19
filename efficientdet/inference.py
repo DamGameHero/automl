@@ -435,7 +435,6 @@ def visualize_image_prediction(image,
     boxes[:, [0, 1, 2, 3]] = boxes[:, [1, 0, 3, 2]]
 
   label_id_mapping = label_id_mapping or coco_id_mapping
-  boxes[:, 2:4] += boxes[:, 0:2]
 
   return visualize_image(image, boxes, classes, scores, label_id_mapping,
                          **kwargs)
