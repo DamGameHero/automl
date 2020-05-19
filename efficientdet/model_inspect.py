@@ -36,6 +36,9 @@ import inference
 import utils
 from tensorflow.python.client import timeline  # pylint: disable=g-direct-tensorflow-import
 
+import sys
+np.set_printoptions(threshold=sys.maxsize)
+
 flags.DEFINE_string('model_name', 'efficientdet-d0', 'Model.')
 flags.DEFINE_string('logdir', '/tmp/deff/', 'log directory.')
 flags.DEFINE_string('runmode', 'dry', 'Run mode: {freeze, bm, dry}')
@@ -74,7 +77,8 @@ flags.DEFINE_string('saved_model_dir', '/tmp/saved_model',
                     'Folder path for saved model.')
 flags.DEFINE_string('tflite_path', None, 'Path for exporting tflite file.')
 
-flags.DEFINE_bool('big_image', False, 'Whether to delete logdir.')
+flags.DEFINE_bool('big_image', False, 'Is an image to cut for inference.')
+flags.DEFINE_bool('raster', False, 'Make raster too.')
 
 FLAGS = flags.FLAGS
 
@@ -192,6 +196,8 @@ class ModelInspector(object):
                 size = (imagette_width*divx, imagette_height*divy)
                 im_resized = im.resize(size)
                 imagettes = []
+                if FLAGS.raster:
+                    raster_image = np.zeros(size[::-1])
                 eval_image = Image.new('RGB', size)
                 eval_time = 0
                 for x in range(divx):
@@ -200,7 +206,29 @@ class ModelInspector(object):
                         # driver.batch_size = len(imagettes)
                         start = time.time()
                         detections_bs = driver.serve_images(imagettes)
+                        # if len(detections_bs[0]) != 0:
+                            # print(detections_bs[0])
+                            # sys.exit(0)
                         eval_time += time.time() - start
+                        if FLAGS.raster:
+                            raster_imagette = np.zeros(shape=(imagette_height, imagette_width))  # useless ?
+                            raster_imagette2 = np.zeros(shape=(imagette_height, imagette_width))
+                            print("len = %", len(detections_bs[0]))
+                            for detection_bs in detections_bs[0]:
+                                ymin = detection_bs[1]
+                                xmin = detection_bs[2]
+                                ymax = detection_bs[3]
+                                xmax = detection_bs[4]
+                                raster_imagette = np.zeros(shape=(imagette_height, imagette_width))
+                                raster_imagette[int(ymin):int(ymax), int(xmin):int(xmax)] = detection_bs[5]
+                                raster_imagette2 = np.maximum(raster_imagette2, raster_imagette)
+                                # print(raster_imagette2)
+                                print(ymin)
+                                print(ymax)
+                                print(xmin)
+                                print(xmax)
+                                print(detection_bs[5])
+                            raster_image[y * imagette_height:(y + 1) * imagette_height, x * imagette_width:(x+1) * imagette_width] = raster_imagette2
                         eval_imagette = driver.visualize(imagettes[0], detections_bs[0], **kwargs)
                         eval_image.paste(Image.fromarray(eval_imagette), (x*imagette_width, y*imagette_height, (x+1)*imagette_width, (y+1)*imagette_height))
                 # for i in range(0, im_resized.width + 1, imagette_width):
@@ -214,7 +242,15 @@ class ModelInspector(object):
                         # k = +1
                     # img_id = str(i * batch_size + j)
                 print("EfficientDet detection in %s seconds ---" % (eval_time))
-                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_detection.jpg')
+                if FLAGS.raster:
+                    raster_image = (raster_image > 0.1) * raster_image * 255  # get threshold detection
+                    raster_image = raster_image.astype(np.uint8)
+                    output_raster_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_TEST_RASTER.png')
+                    ras_img = Image.fromarray(raster_image)
+                    ras_img2 = ras_img.resize(im.size)
+                    ras_img2.save(output_raster_path, "PNG")
+                # output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_detection.jpg')
+                output_image_path = os.path.join(output_dir, img_name[:-4] + '_EfficientDet_TEST.jpg')
                 eval_image_resized = eval_image.resize((im.width, im.height))
                 eval_image_resized.save(output_image_path)
                 logging.info('writing file to %s', output_image_path)
