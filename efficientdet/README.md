@@ -83,7 +83,7 @@ Then you will get:
  - frozen graph with name savedmodeldir/efficientdet-d0_frozen.pb
  - tflite file with name efficientdet-d0.tflite
 
-Notably, --tflite_path does not work for now. It requires some extra fixes in future TensorFlow rerlease (> 2.2.0-rc4).
+Notably, --tflite_path only works after 2.3.0-dev20200521.
 
 
 ## 4. Benchmark model latency.
@@ -147,7 +147,6 @@ latency and throughput are:
     # Step 2: do inference with saved model.
     !python model_inspect.py --runmode=saved_model_infer \
       --model_name=efficientdet-d0  \
-      --hparams="image_size=1920x1280"  \
       --saved_model_dir=/tmp/saved_model  \
       --input_image=img.png --output_image_dir=/tmp/
     # you can visualize the output /tmp/0.jpg
@@ -159,7 +158,6 @@ Alternatively, if you want to do inference using frozen graph instead of saved m
     # Step 2: do inference with frozen graph.
     !python model_inspect.py --runmode=saved_model_infer \
       --model_name=efficientdet-d0  \
-      --hparams="image_size=1920x1280"  \
       --saved_model_dir=/tmp/saved_model/efficientdet-d0_frozen.pb  \
       --input_image=img.png --output_image_dir=/tmp/
 
@@ -220,8 +218,7 @@ You can run inference for a video and show the results online:
     !python main.py --mode=eval  \
         --model_name=${MODEL}  --model_dir=${CKPT_PATH}  \
         --validation_file_pattern=tfrecord/val*  \
-        --val_json_file=annotations/instances_val2017.json  \
-        --use_tpu=False
+        --val_json_file=annotations/instances_val2017.json
 
 You can also run eval on test-dev set with the following command:
 
@@ -242,8 +239,7 @@ You can also run eval on test-dev set with the following command:
     !python main.py --mode=eval  \
         --model_name=${MODEL}  --model_dir=${CKPT_PATH}  \
         --validation_file_pattern=tfrecord/testdev*  \
-        --testdev_dir='testdev_output' --eval_samples=20288 \
-        --use_tpu=False
+        --testdev_dir='testdev_output' --eval_samples=20288
     # Now you can submit testdev_output/detections_test-dev2017_test_results.json to
     # coco server: https://competitions.codalab.org/competitions/20794#participate
 
@@ -269,8 +265,7 @@ You can also run eval on test-dev set with the following command:
         --train_batch_size=8 \
         --eval_batch_size=8 --eval_samples=512 \
         --num_examples_per_epoch=5717 --num_epochs=1  \
-        --hparams="num_classes=20,moving_average_decay=0" \
-        --use_tpu=False
+        --hparams="num_classes=20,moving_average_decay=0"
 
 ## 9. Finetune on PASCAL VOC 2012 with detector COCO ckpt.
 Create a config file for the PASCAL VOC dataset called voc_config.yaml and put this in it.
@@ -294,8 +289,7 @@ Finetune needs to use --ckpt rather than --backbone_ckpt.
         --train_batch_size=8 \
         --eval_batch_size=8 --eval_samples=1024 \
         --num_examples_per_epoch=5717 --num_epochs=1  \
-        --hparams=voc_config.yaml \
-        --use_tpu=False
+        --hparams=voc_config.yaml
 
 If you want to do inference for custom data, you can run
 
@@ -308,6 +302,7 @@ If you want to do inference for custom data, you can run
 You should check more details of runmode which is written in caption-4.
 
 ## 10. Train on multi GPUs.
+
 Install [horovod](https://github.com/horovod/horovod#id6).
 
 Create a config file for the PASCAL VOC dataset called voc_config.yaml and put this in it.
@@ -322,7 +317,7 @@ Download efficientdet coco checkpoint.
 
 Finetune needs to use --ckpt rather than --backbone_ckpt.
 
-    !horovodrun -np <num_gpus> -H localhost:<num_gpus> python main.py --mode=train_and_eval \
+    !horovodrun -np <num_gpus> -H localhost:<num_gpus> python main.py --mode=train \
         --training_file_pattern=tfrecord/pascal*.tfrecord \
         --validation_file_pattern=tfrecord/pascal*.tfrecord \
         --model_name=efficientdet-d0 \
@@ -331,8 +326,8 @@ Finetune needs to use --ckpt rather than --backbone_ckpt.
         --train_batch_size=8 \
         --eval_batch_size=8 --eval_samples=1024 \
         --num_examples_per_epoch=5717 --num_epochs=1  \
-        --hparams=voc_config.yaml \
-        --use_tpu=False
+        --hparams=voc_config.yaml
+        --strategy=horovod
 
 If you want to do inference for custom data, you can run
 
@@ -355,7 +350,7 @@ To train this model on Cloud TPU, you will need:
 Then train the model:
 
     !export PYTHONPATH="$PYTHONPATH:/path/to/models"
-    !python main.py --tpu=TPU_NAME --training_file_pattern=DATA_DIR/*.tfrecord --model_dir=MODEL_DIR
+    !python main.py --tpu=TPU_NAME --training_file_pattern=DATA_DIR/*.tfrecord --model_dir=MODEL_DIR --strategy=tpu
 
     # TPU_NAME is the name of the TPU node, the same name that appears when you run gcloud compute tpus list, or ctpu ls.
     # MODEL_DIR is a GCS location (a URL starting with gs:// where both the GCE VM and the associated Cloud TPU have write access.
